@@ -11,9 +11,79 @@ import random
 import os
 
 from utils import logger, random_delay
+from proxy_manager import ProxyManager
 
-def setup_driver():
-    """Configure and return an undetected Chrome WebDriver with enhanced anti-detection measures"""
+# Initialize the proxy manager as a global instance
+proxy_manager = ProxyManager()
+
+def initialize_proxies(proxy_sources=None):
+    """
+    Initialize the proxy manager with proxies from various sources
+    
+    Args:
+        proxy_sources: Dictionary with proxy source configurations
+    """
+    global proxy_manager
+    
+    # Default proxy sources if none provided
+    if proxy_sources is None:
+        proxy_sources = {
+            'files': ['proxies.txt'],
+            'api': {
+                'enabled': False,
+                'url': '',
+                'api_key': '',
+                'headers': {},
+                'format': 'json',
+                'path': 'data'
+            },
+            'verify': True,
+            'verification_url': 'https://httpbin.org/ip',
+            'timeout': 10,
+            'max_check': 50  # Limit how many to check for speed
+        }
+    
+    # Load proxies from files
+    for file_path in proxy_sources.get('files', []):
+        if os.path.exists(file_path):
+            if file_path.endswith('.json'):
+                proxy_manager.load_from_json(file_path)
+            else:
+                proxy_manager.load_from_file(file_path)
+    
+    # Load proxies from API if enabled
+    api_config = proxy_sources.get('api', {})
+    if api_config.get('enabled', False) and api_config.get('url'):
+        proxy_manager.load_from_api(
+            api_url=api_config['url'],
+            headers=api_config.get('headers'),
+            api_key=api_config.get('api_key'),
+            response_format=api_config.get('format', 'json'),
+            proxy_path=api_config.get('path', 'data')
+        )
+    
+    # Verify proxies if enabled
+    if proxy_sources.get('verify', True):
+        proxy_manager.verify_proxies(
+            test_url=proxy_sources.get('verification_url', 'https://httpbin.org/ip'),
+            timeout=proxy_sources.get('timeout', 10),
+            max_proxies=proxy_sources.get('max_check')
+        )
+    
+    logger.info(f"Proxy initialization complete. {proxy_manager.get_proxy_count()}")
+
+def setup_driver_with_proxy(use_proxy=True, proxy_type='http'):
+    """
+    Configure and return an undetected Chrome WebDriver with proxy support
+    
+    Args:
+        use_proxy: Whether to use a proxy
+        proxy_type: Type of proxy (http, https, socks4, socks5)
+        
+    Returns:
+        Configured undetected_chromedriver instance
+    """
+    global proxy_manager
     
     # Define a comprehensive list of user agents
     user_agents = [
@@ -43,7 +113,7 @@ def setup_driver():
     logger.info(f"Using user agent: {selected_user_agent}")
     
     # Using undetected_chromedriver (more resistant to detection)
-    logger.info("Using undetected_chromedriver exclusively")
+    logger.info("Using undetected_chromedriver with proxy support")
     options = uc.ChromeOptions()
     
     # Basic configuration (undetected_chromedriver handles most anti-detection internally)
@@ -69,9 +139,12 @@ def setup_driver():
     height = random.randint(800, 1080)
     options.add_argument(f"--window-size={width},{height}")
     
-    # Enhanced proxy settings (uncomment and fill in details if using a proxy)
-    # proxy = "your-proxy-address:port"
-    # options.add_argument(f'--proxy-server={proxy}')
+    # Add proxy if requested
+    if use_proxy and proxy_manager.get_proxy_count()['total'] > 0:
+        proxy = proxy_manager.get_proxy_server_arg(proxy_type)
+        if proxy:
+            logger.info(f"Using proxy: {proxy}")
+            options.add_argument(f'--proxy-server={proxy}')
     
     # Create and configure the undetected driver
     try:
@@ -93,30 +166,8 @@ def setup_driver():
             headless=False
         )
     
-    # Set common timeouts
+    # Set page load timeout
     driver.set_page_load_timeout(30)
-    
-    # Add randomized viewport dimensions and scroll positions for first page load
-    if hasattr(driver, "execute_script"):
-        # Randomize scroll behavior
-        driver.execute_script(f"window.scrollTo(0, {random.randint(10, 50)});")
-    
-    # Add a small fingerprint randomization to mouse movements
-    try:
-        driver.execute_script("""
-        // Create a fake WebGL fingerprint variance
-        HTMLCanvasElement.prototype.getContext = (function(origFn) {
-            return function(type, attrs) {
-                if (type === 'webgl' || type === 'experimental-webgl') {
-                    attrs = attrs || {};
-                    attrs.preserveDrawingBuffer = true;
-                }
-                return origFn.call(this, type, attrs);
-            };
-        })(HTMLCanvasElement.prototype.getContext);
-        """)
-    except:
-        pass
     
     return driver
 
@@ -166,3 +217,33 @@ def handle_modals_and_cookies(driver):
             time.sleep(random.uniform(0.3, 0.8))
         except:
             pass
+            
+def rotate_proxy_if_needed(driver):
+    """
+    Check if we should rotate to a new proxy, and if so, create a new driver instance
+    
+    Args:
+        driver: Current driver instance
+        
+    Returns:
+        Either the existing driver or a new one with a different proxy
+    """
+    global proxy_manager
+    
+    if proxy_manager.should_rotate():
+        logger.info("Rotation interval reached, switching to a new proxy")
+        try:
+            # Quit the current driver
+            driver.quit()
+        except:
+            pass
+            
+        # Create a new driver with a fresh proxy
+        return setup_driver_with_proxy()
+    
+    return driver
+
+# For backward compatibility
+def setup_driver():
+    """Legacy function that calls setup_driver_with_proxy"""
+    return setup_driver_with_proxy(use_proxy=True)
